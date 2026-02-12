@@ -1,8 +1,9 @@
-import {JsonForm, useJsonForm, type JsonSchema, type UISchemaElement} from "../components/JsonForm";
-import {sendTaskCommand} from "../services/task.ts";
-import {useNavigate, useParams} from "react-router-dom";
-import {useState} from "react";
-import {Button} from "@radix-ui/themes";
+import { JsonForm, useJsonForm, type JsonSchema, type UISchemaElement } from "../components/JsonForm";
+import { sendTaskCommand } from "../services/task.ts";
+import { uploadFile } from "../services/upload";
+import { useNavigate, useParams, useLocation } from "react-router-dom";
+import { useState } from "react";
+import { Button } from "@radix-ui/themes";
 
 
 export interface TaskFormData {
@@ -18,38 +19,69 @@ export type SimpleFormConfig = {
 }
 
 function TraderForm(props: { formInfo: TaskFormData, pluginState: string }) {
-  const {consignmentId, taskId} = useParams<{
-    consignmentId: string
-    taskId: string
+  const { consignmentId, preConsignmentId, taskId } = useParams<{
+    consignmentId?: string
+    preConsignmentId?: string
+    taskId?: string
   }>()
+  const location = useLocation()
   const navigate = useNavigate()
   const [error, setError] = useState<string | null>(null)
 
   const READ_ONLY_STATES = ['OGA_REVIEWED', 'SUBMITTED', 'OGA_ACKNOWLEDGED'];
   const isReadOnly = READ_ONLY_STATES.includes(props.pluginState);
 
+  const isPreConsignment = location.pathname.includes('/pre-consignments/')
+  const workflowId = preConsignmentId || consignmentId
+
+  const replaceFilesWithKeys = async (value: unknown): Promise<unknown> => {
+    if (value instanceof File) {
+      const metadata = await uploadFile(value)
+      return metadata.key
+    }
+
+    if (Array.isArray(value)) {
+      const mapped = await Promise.all(value.map(replaceFilesWithKeys))
+      return mapped
+    }
+
+    if (value && typeof value === 'object') {
+      const entries = await Promise.all(
+        Object.entries(value as Record<string, unknown>).map(async ([key, nested]) => [
+          key,
+          await replaceFilesWithKeys(nested),
+        ] as const)
+      )
+      return Object.fromEntries(entries)
+    }
+
+    return value
+  }
+
   const handleSubmit = async (data: unknown) => {
-    if (!consignmentId || !taskId) {
-      setError('Consignment ID or Task ID is missing.')
+    if (!workflowId || !taskId) {
+      setError('Workflow ID or Task ID is missing.')
       return
     }
 
     try {
       setError(null)
 
-      // Send form submission with SUBMIT_FORM action
+      // Send form submission - data now contains file keys (strings) instead of File objects
+      const preparedData = await replaceFilesWithKeys(data) as Record<string, unknown>
+
       const response = await sendTaskCommand({
         command: 'SUBMISSION',
         taskId,
-        workflowId:   consignmentId,
-        data: data as Record<string, unknown>,
+        workflowId,
+        data: preparedData,
       })
 
       if (response.success) {
-        // Navigate back to consignment details
-        navigate(`/consignments/${consignmentId}`)
+        // Navigate back to appropriate workflow list
+        navigate(isPreConsignment ? '/pre-consignments' : `/consignments/${workflowId}`)
       } else {
-        setError(response.message || 'Failed to submit form.')
+        setError(response.error?.message || 'Failed to submit form.')
       }
     } catch (err) {
       console.error('Error submitting form:', err)

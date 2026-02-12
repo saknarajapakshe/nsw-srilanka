@@ -16,6 +16,7 @@ import {
   TextareaField,
   SelectField,
   CheckboxField,
+  FileField,
 } from './fields';
 
 // Helper to get nested value from object using dot notation
@@ -110,7 +111,13 @@ function getFieldType(control: ResolvedControl): string {
 
   // Check for explicit format override in options
   if (options?.format) {
+    if (options.format === 'file') return 'file';
     return options.format;
+  }
+
+  // Check for file type
+  if (property.format === 'file') {
+    return 'file';
   }
 
   // Check for textarea (multi-line string)
@@ -338,6 +345,8 @@ function renderControl(
       return <SelectField key={resolved.name} {...fieldProps} />;
     case 'checkbox':
       return <CheckboxField key={resolved.name} {...fieldProps} />;
+    case 'file':
+      return <FileField key={resolved.name} {...fieldProps} />;
     default:
       return <TextField key={resolved.name} {...fieldProps} />;
   }
