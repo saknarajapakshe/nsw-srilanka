@@ -7,6 +7,7 @@ export function getStateColor(
   state: ConsignmentState
 ): 'gray' | 'orange' | 'green' | 'red' {
   switch (state) {
+    case 'INITIALIZED':
     case 'IN_PROGRESS':
       return 'orange'
     case 'FINISHED':

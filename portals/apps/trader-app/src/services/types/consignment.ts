@@ -1,6 +1,18 @@
+export interface CHA {
+  id: string
+  name: string
+  description: string
+  email?: string
+}
+
 export type TradeFlow = 'IMPORT' | 'EXPORT'
 
-export type ConsignmentState = 'IN_PROGRESS' | 'REQUIRES_REWORK' | 'FINISHED' | 'COMPLETED'
+export type ConsignmentState =
+  | 'INITIALIZED'
+  | 'IN_PROGRESS'
+  | 'REQUIRES_REWORK'
+  | 'FINISHED'
+  | 'COMPLETED'
 
 export type WorkflowNodeState = 'READY' | 'LOCKED' | 'IN_PROGRESS' | 'COMPLETED' | 'REJECTED'
 
@@ -47,6 +59,7 @@ export interface ConsignmentSummary {
   id: string
   flow: TradeFlow
   traderId: string
+  chaId?: string
   state: ConsignmentState
   items: ConsignmentItem[]
   createdAt: string
@@ -59,6 +72,7 @@ export interface ConsignmentDetail {
   id: string
   flow: TradeFlow
   traderId: string
+  chaId?: string
   state: ConsignmentState
   items: ConsignmentItem[]
   globalContext: GlobalContext
@@ -76,7 +90,8 @@ export interface CreateConsignmentItemRequest {
 
 export interface CreateConsignmentRequest {
   flow: TradeFlow
-  items: CreateConsignmentItemRequest[]
+  items?: CreateConsignmentItemRequest[]
+  chaId?: string
 }
 
 export type CreateConsignmentResponse = ConsignmentDetail
