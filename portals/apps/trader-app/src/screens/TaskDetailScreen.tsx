@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Button, Spinner, Text } from '@radix-ui/themes'
 import { ArrowLeftIcon } from '@radix-ui/react-icons'
@@ -6,50 +6,71 @@ import { getTaskInfo } from '../services/task'
 import { useApi } from '../services/ApiContext'
 import PluginRenderer, { type RenderInfo } from '../plugins'
 
+const POLL_INTERVAL_MS = 3000
+const PAYMENT_TERMINAL_STATES = ['COMPLETED', 'FAILED']
+const WAIT_FOR_EVENT_TERMINAL_STATES = ['COMPLETED', 'RECEIVED_CALLBACK', 'NOTIFY_FAILED', 'SUBMISSION_FAILED']
+
 export function TaskDetailScreen() {
-  const { taskId, consignmentId, preConsignmentId } = useParams<{
-    taskId: string
-    consignmentId?: string
-    preConsignmentId?: string
-  }>()
+  const { taskId } = useParams<{ taskId: string }>()
   const navigate = useNavigate()
+  const goBack = () => navigate(-1)
   const api = useApi()
   const [renderInfo, setRenderInfo] = useState<RenderInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const parentRoute = consignmentId
-    ? `/consignments/${consignmentId}`
-    : preConsignmentId
-      ? `/pre-consignments/${preConsignmentId}`
-      : '/consignments'
-  const goBack = () => {
-    void navigate(parentRoute)
-  }
-
-  const fetchTask = useCallback(async () => {
-    if (!taskId) {
-      setError('Task ID is missing.')
-      setLoading(false)
-      return
+  const stopPolling = useCallback(() => {
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current)
+      pollTimerRef.current = null
     }
+  }, [])
 
-    try {
-      setLoading(true)
-      setError(null)
-      const taskRenderInfo = await getTaskInfo(taskId, api)
-      setRenderInfo(taskRenderInfo)
-    } catch (err) {
-      setError('Failed to fetch task details.')
-      console.error(err)
-    } finally {
-      setLoading(false)
-    }
-  }, [api, taskId])
+  const fetchTask = useCallback(
+    async (silent = false) => {
+      stopPolling()
+      if (!taskId) {
+        setError('Task ID is missing.')
+        setLoading(false)
+        return
+      }
+
+      try {
+        if (!silent) setLoading(true)
+        if (!silent) setError(null)
+        const taskRenderInfo = await getTaskInfo(taskId, api)
+        setRenderInfo(taskRenderInfo)
+
+        // Poll for tasks that are still in progress
+        const { type, pluginState } = taskRenderInfo
+        const shouldPoll =
+          (type === 'PAYMENT' && !PAYMENT_TERMINAL_STATES.includes(pluginState)) ||
+          (type === 'WAIT_FOR_EVENT' && !WAIT_FOR_EVENT_TERMINAL_STATES.includes(pluginState))
+        if (shouldPoll) {
+          pollTimerRef.current = setTimeout(() => void fetchTask(true), POLL_INTERVAL_MS)
+        } else {
+          stopPolling()
+        }
+      } catch (err) {
+        if (silent) {
+          console.error('Background poll failed:', err)
+          pollTimerRef.current = setTimeout(() => void fetchTask(true), POLL_INTERVAL_MS)
+        } else {
+          setError('Failed to fetch task details.')
+          console.error(err)
+        }
+      } finally {
+        if (!silent) setLoading(false)
+      }
+    },
+    [api, taskId, stopPolling],
+  )
 
   useEffect(() => {
-    fetchTask()
-  }, [fetchTask])
+    void fetchTask()
+    return () => stopPolling()
+  }, [fetchTask, stopPolling])
 
   if (loading) {
     return (

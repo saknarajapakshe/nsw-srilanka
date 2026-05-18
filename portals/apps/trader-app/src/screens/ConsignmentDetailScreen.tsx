@@ -1,15 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Button, Badge, Spinner, Text, Progress, Flex, IconButton, Tooltip as RadixTooltip } from '@radix-ui/themes'
-import {
-  ArrowLeftIcon,
-  ListBulletIcon,
-  ViewGridIcon,
-  InfoCircledIcon,
-  CheckCircledIcon,
-  ClockIcon,
-  MagnifyingGlassIcon,
-} from '@radix-ui/react-icons'
+import { Button, Badge, Spinner, Text, Flex } from '@radix-ui/themes'
+import { ArrowLeftIcon, InfoCircledIcon, ClockIcon, MagnifyingGlassIcon, ReloadIcon } from '@radix-ui/react-icons'
 import { WorkflowViewer, ActionListView } from '../components/WorkflowViewer'
 import type { ConsignmentDetail } from '../services/types/consignment.ts'
 import { getConsignment, initializeConsignment } from '../services/consignment.ts'
@@ -29,7 +21,7 @@ export function ConsignmentDetailScreen() {
   const [error, setError] = useState<string | null>(null)
   const [hsPickerOpen, setHsPickerOpen] = useState(false)
   const [initializing, setInitializing] = useState(false)
-  const [viewMode, setViewMode] = useState<'list' | 'graph'>('list')
+  const [viewMode] = useState<'list' | 'graph'>('list')
 
   const { role } = useRole()
 
@@ -111,11 +103,7 @@ export function ConsignmentDetailScreen() {
     )
   }
 
-  const item = consignment.items?.[0]
   const workflowNodes = consignment.workflowNodes || []
-  const completedSteps = workflowNodes.filter((n) => n.state === 'COMPLETED').length
-  const totalSteps = workflowNodes.length
-  const progressPercentage = totalSteps > 0 ? (completedSteps / totalSteps) * 100 : 0
   const isChaView = role === 'cha'
 
   const handleSelectHSCode = async (hsCode: HSCode) => {
@@ -136,7 +124,8 @@ export function ConsignmentDetailScreen() {
 
   return (
     <div className="p-4 md:p-6 h-[calc(100vh-64px)] flex flex-col">
-      <div className="mb-4 md:mb-6">
+      {/* Top row: Back + Refresh */}
+      <div className="mb-3 flex items-center justify-between">
         <Button
           variant="ghost"
           color="gray"
@@ -146,6 +135,40 @@ export function ConsignmentDetailScreen() {
           <ArrowLeftIcon />
           Back
         </Button>
+        <Button
+          variant="soft"
+          color="blue"
+          size="2"
+          onClick={handleRefresh}
+          disabled={refreshing}
+          className="cursor-pointer"
+        >
+          <ReloadIcon className={refreshing ? 'animate-spin' : ''} />
+          Refresh
+        </Button>
+      </div>
+
+      {/* Title row */}
+      <div className="mb-3 mt-2 flex items-center gap-3">
+        <h1 className="text-xl font-semibold text-gray-900">Consignment View</h1>
+        <Badge size="2" color={getStateColor(consignment.state)}>
+          {formatState(consignment.state)}
+        </Badge>
+        <Badge size="1" color={consignment.flow === 'IMPORT' ? 'blue' : 'green'} variant="soft">
+          {consignment.flow}
+        </Badge>
+      </div>
+
+      {/* ID + date row */}
+      <div className="mb-4 md:mb-6 flex items-start gap-10">
+        <div>
+          <p className="text-xs font-semibold text-gray-400 mb-0.5">Consignment ID</p>
+          <p className="text-xs font-mono text-gray-700">{consignment.id}</p>
+        </div>
+        <div>
+          <p className="text-xs font-semibold text-gray-400 mb-0.5">Date Created</p>
+          <p className="text-xs text-gray-700">{formatDateTime(consignment.createdAt)}</p>
+        </div>
       </div>
 
       <div className="bg-white rounded-lg shadow flex flex-col flex-1 min-h-0 relative">
@@ -159,85 +182,10 @@ export function ConsignmentDetailScreen() {
             </div>
           </div>
         )}
-        <div className="p-4 border-b border-gray-200">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-xl font-semibold text-gray-900">Consignment</h1>
-              <p className="text-xs text-gray-500 font-mono">{consignment.id}</p>
-              <p className="text-xs text-gray-500">{formatDateTime(consignment.createdAt)}</p>
-            </div>
-            <div className="flex flex-col items-end gap-1.5">
-              <Badge size="2" color={getStateColor(consignment.state)}>
-                {formatState(consignment.state)}
-              </Badge>
-              <Badge size="1" color={consignment.flow === 'IMPORT' ? 'blue' : 'green'} variant="soft">
-                {consignment.flow}
-              </Badge>
-            </div>
-          </div>
-        </div>
-
-        <div className="px-4 py-3 border-b border-gray-200 bg-gray-50/30">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div>
-              <h3 className="text-xs font-medium text-gray-500 mb-1">Item Details</h3>
-              <p className="text-sm font-medium text-gray-900">{item?.hsCode?.hsCode || '-'}</p>
-              <p className="text-xs text-gray-600 line-clamp-1">{item?.hsCode?.description || '-'}</p>
-            </div>
-            <div>
-              <h3 className="text-xs font-medium text-gray-500 mb-1">Workflow Progress</h3>
-              <div className="flex items-center gap-2 mb-1">
-                <Progress
-                  value={progressPercentage}
-                  className="flex-1"
-                  size="2"
-                  color={progressPercentage === 100 ? 'green' : progressPercentage > 0 ? 'blue' : 'gray'}
-                />
-                <Text size="1" weight="medium" className="text-gray-700 min-w-[3rem] text-right">
-                  {completedSteps}/{totalSteps}
-                </Text>
-              </div>
-              <Text size="1" color="gray">
-                {progressPercentage === 100 ? 'All steps completed' : `${Math.round(progressPercentage)}% complete`}
-              </Text>
-            </div>
-          </div>
-        </div>
 
         <div className="p-4 flex-1 flex flex-col min-h-0">
-          <Flex align="center" justify="between" mb="3">
-            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest">Workflow Process</h3>
-
-            <Flex gap="1" className="bg-gray-100 p-1 rounded-lg border border-gray-200 shadow-sm">
-              <RadixTooltip content="List View (Action Oriented)">
-                <IconButton
-                  variant={viewMode === 'list' ? 'solid' : 'soft'}
-                  color={viewMode === 'list' ? 'blue' : 'gray'}
-                  highContrast={viewMode !== 'list'}
-                  size="2"
-                  onClick={() => setViewMode('list')}
-                  className="cursor-pointer transition-all duration-200"
-                >
-                  <ListBulletIcon width="18" height="18" />
-                </IconButton>
-              </RadixTooltip>
-              <RadixTooltip content="Workflow Graph (Visualizer)">
-                <IconButton
-                  variant={viewMode === 'graph' ? 'solid' : 'soft'}
-                  color={viewMode === 'graph' ? 'blue' : 'gray'}
-                  highContrast={viewMode !== 'graph'}
-                  size="2"
-                  onClick={() => setViewMode('graph')}
-                  className="cursor-pointer transition-all duration-200"
-                >
-                  <ViewGridIcon width="18" height="18" />
-                </IconButton>
-              </RadixTooltip>
-            </Flex>
-          </Flex>
-
           {workflowNodes.length > 0 ? (
-            <div className="flex-1 min-h-0 bg-gray-50/50 rounded-xl border border-gray-200/50 p-2 sm:p-4 shadow-inner flex flex-col overflow-hidden">
+            <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
               {viewMode === 'list' ? (
                 <ActionListView
                   className="flex-1 min-h-0"
@@ -332,46 +280,6 @@ export function ConsignmentDetailScreen() {
                 </Text>
               </div>
             </div>
-          )}
-        </div>
-
-        <div className="px-4 py-3 border-t border-gray-200 bg-gradient-to-r from-blue-50/50 to-indigo-50/50">
-          <Flex align="center" gap="2" mb="1">
-            <div className="w-1.5 h-3 bg-blue-500 rounded-full" />
-            <h3 className="text-xs font-bold text-gray-700">Next Steps</h3>
-          </Flex>
-          {consignment.state === 'INITIALIZED' ? (
-            <Text size="1" color="gray" className="flex items-center gap-1.5">
-              <InfoCircledIcon className="text-blue-500" />
-              <span className="font-medium text-gray-900">Current Bottleneck:</span>
-              {isChaView
-                ? 'Waiting for you to select an HS Code to initialize the workflow process.'
-                : 'Waiting for CHA to select an HS Code to initialize the workflow process.'}
-            </Text>
-          ) : workflowNodes.length === 0 ? (
-            <Text size="1" color="gray">
-              No actions required at this time.
-            </Text>
-          ) : workflowNodes.some((n) => n.state === 'READY') ? (
-            <Text size="1" color="gray" className="flex items-center gap-1.5">
-              <InfoCircledIcon className="text-blue-500" />
-              <span className="font-medium text-gray-900">Action required:</span>
-              Proceed with tasks marked as{' '}
-              <Badge size="1" color="blue" variant="soft">
-                Ready
-              </Badge>{' '}
-              in the list above.
-            </Text>
-          ) : workflowNodes.every((n) => n.state === 'COMPLETED') ? (
-            <Text size="1" color="green" weight="medium" className="flex items-center gap-1.5">
-              <CheckCircledIcon />
-              All steps have been completed. Your consignment is ready.
-            </Text>
-          ) : (
-            <Text size="1" color="gray" className="flex items-center gap-1.5">
-              <ClockIcon />
-              Waiting for dependent steps to be completed before you can proceed.
-            </Text>
           )}
         </div>
       </div>

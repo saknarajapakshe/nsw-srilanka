@@ -5,6 +5,8 @@ import type { WorkflowNode } from '../../services/types/consignment'
 import { ActionCard } from './ActionCard'
 import { CollapsibleSection } from './CollapsibleSection'
 
+const sortByUpdatedAt = (a: WorkflowNode, b: WorkflowNode) => b.updatedAt.localeCompare(a.updatedAt)
+
 interface ActionListViewProps {
   steps: WorkflowNode[]
   consignmentId: string
@@ -32,8 +34,7 @@ export function ActionListView({
   const groups = useMemo(() => {
     return {
       active: filteredSteps.filter((s) => s.state === 'READY' || s.state === 'IN_PROGRESS'),
-      upcoming: filteredSteps.filter((s) => s.state === 'LOCKED'),
-      finished: filteredSteps.filter((s) => s.state === 'COMPLETED' || s.state === 'FAILED'),
+      finished: filteredSteps.filter((s) => s.state === 'COMPLETED' || s.state === 'FAILED').sort(sortByUpdatedAt),
     }
   }, [filteredSteps])
 
@@ -41,7 +42,7 @@ export function ActionListView({
 
   const displaySteps = useMemo(() => {
     if (isConsignmentTerminal) {
-      return filteredSteps.filter((s) => s.state === 'COMPLETED' || s.state === 'FAILED')
+      return filteredSteps.filter((s) => s.state === 'COMPLETED' || s.state === 'FAILED').sort(sortByUpdatedAt)
     }
     return filteredSteps
   }, [filteredSteps, isConsignmentTerminal])
@@ -92,7 +93,6 @@ export function ActionListView({
                       {groups.active.length}
                     </Badge>
                   </Flex>
-                  {RefreshButton}
                 </Flex>
                 <Box px="0.5">
                   {groups.active.map((step) => (
@@ -135,12 +135,6 @@ export function ActionListView({
                 </Text>
               </Box>
             ) : null}
-
-            <CollapsibleSection title="Upcoming Tasks" count={groups.upcoming.length}>
-              {groups.upcoming.map((step) => (
-                <ActionCard key={step.id} step={step} consignmentId={consignmentId} />
-              ))}
-            </CollapsibleSection>
 
             <CollapsibleSection title="Process History" count={groups.finished.length} color="green">
               {groups.finished.map((step) => (
