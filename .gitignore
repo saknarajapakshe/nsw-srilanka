@@ -1,0 +1,30 @@
+# Build directories
+**/bin/
+**/dist/
+**/node_modules/
+
+# Go build files
+**/server/server
+
+# Package manager files
+**/package-lock.json  # We use pnpm now
+**/.pnpm-store/
+.pnpm-debug.log*
+
+# Test coverage files
+coverage.out
+coverage.html
+
+## Environment Variables
+.env*
+!*.example
+
+# Services Configs
+backend/configs/*
+!backend/configs/*.example.json
+
+# Intellij Configs
+**/.idea/**
+
+# SQLite
+*.db
