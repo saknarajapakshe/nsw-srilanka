@@ -5,6 +5,7 @@
 
 # Go build files
 **/server/server
+/server
 
 # Package manager files
 **/package-lock.json  # We use pnpm now

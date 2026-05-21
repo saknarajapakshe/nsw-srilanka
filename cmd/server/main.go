@@ -1,90 +1,174 @@
+// Package main is the entry point for the Sri Lanka NSW Task Flow server.
+//
+// It wires together the Temporal orchestrators and serves the single-window
+// portal UI on http://localhost:8080.
 package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log"
-	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"github.com/OpenNSW/nsw/internal/app/bootstrap"
-	"github.com/OpenNSW/nsw/internal/config"
+	engine "github.com/OpenNSW/go-temporal-workflow"
+	"github.com/OpenNSW/nsw-task-flow/orchestrator"
+	"github.com/OpenNSW/nsw-task-flow/plugins"
+	"github.com/OpenNSW/nsw/srilanka/internal/plugins/payments"
+	"go.temporal.io/sdk/client"
 )
 
 func main() {
-	// Load configuration from environment variables
-	cfg, err := config.Load()
+	realEndpoints := flag.Bool("real", false, "Use real external endpoints instead of mock/demo dispatchers")
+	flag.Parse()
+
+	// 1. Temporal client
+	c, err := client.Dial(client.Options{
+		HostPort: client.DefaultHostPort,
+	})
 	if err != nil {
-		log.Fatalf("failed to load configuration: %v", err)
+		log.Fatalln("Unable to create Temporal client", err)
+	}
+	defer c.Close()
+
+	// 2. Store & Task Template Registry
+	// Templates are loaded from ./templates/*.json — add a new file to register a new flow.
+	db := NewTaskDB()
+	registry := orchestrator.NewTaskTemplateRegistry()
+	if err := loadTemplates(registry, "templates"); err != nil {
+		log.Fatalln("Failed to load task template registry:", err)
 	}
 
-	opts := &slog.HandlerOptions{
-		AddSource: cfg.Server.Debug,
-		Level:     cfg.Server.LogLevel,
+	// 3. Set up Task Plugins Registry
+	pluginsRegistry := plugins.NewRegistry()
+	if err := pluginsRegistry.Register("APPLICATION", plugins.NewUserInputPlugin()); err != nil {
+		log.Fatalln("Failed to register user input plugin:", err)
 	}
-	logHandler := slog.NewTextHandler(os.Stdout, opts)
-	slog.SetDefault(slog.New(logHandler))
 
-	slog.Info("configuration loaded successfully",
-		"db_host", cfg.Database.Host,
-		"db_port", cfg.Database.Port,
-		"db_name", cfg.Database.Name,
-		"db_sslmode", cfg.Database.SSLMode,
-	)
-
-	slog.Info("CORS configuration",
-		"allowed_origins", cfg.CORS.AllowedOrigins,
-		"allowed_methods", cfg.CORS.AllowedMethods,
-		"allowed_headers", cfg.CORS.AllowedHeaders,
-		"allow_credentials", cfg.CORS.AllowCredentials,
-		"max_age", cfg.CORS.MaxAge,
-	)
-
-	slog.Info("server configuration",
-		"port", cfg.Server.Port,
-	)
-
-	app, err := bootstrap.Build(context.Background(), cfg)
-	if err != nil {
-		log.Fatalf("failed to bootstrap application: %v", err)
+	// Pure local mock dispatcher: avoids external HTTP calls to keep the execution self-contained
+	// and fast. The Task's status transitions to QUEUED_EXTERNALLY, allowing the local reviewer
+	// dashboard to query it and submit responses locally.
+	localDispatcher := func(ctx context.Context, url string, taskID string, payload map[string]any) error {
+		log.Printf("[Local Dispatcher] Asynchronously queued task %s in local Reviewer dashboard queue (mock destination: %s). Waiting for reviewer action...", taskID, url)
+		return nil
 	}
-	defer func() {
-		if err := app.Close(); err != nil {
-			slog.Error("failed to close application", "error", err)
-		}
-	}()
-	server := app.Server
 
-	// Channel to listen for interrupt signals
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-
-	// Start server in a goroutine
-	go func() {
-		slog.Info("starting server", "port", cfg.Server.Port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("failed to start server", "error", err)
-			quit <- syscall.SIGTERM
-		}
-	}()
-
-	// Wait for interrupt signal
-	<-quit
-	slog.Info("shutting down server...")
-
-	// Create a context with timeout for graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Attempt graceful shutdown of HTTP server
-	if err := server.Shutdown(ctx); err != nil {
-		slog.Error("server forced to shutdown", "error", err)
+	var activeDispatcher plugins.Dispatcher
+	if *realEndpoints {
+		log.Println("[INFO] Server is configured to use REAL external HTTP endpoints (DefaultHTTPDispatcher)")
+		activeDispatcher = plugins.DefaultHTTPDispatcher
 	} else {
-		slog.Info("server gracefully stopped")
+		log.Println("[INFO] Server is configured to use local mock dispatcher")
+		activeDispatcher = localDispatcher
 	}
 
-	slog.Info("server stopped")
+	if err := pluginsRegistry.Register("APPLICATION", plugins.NewExternalReviewPlugin(activeDispatcher)); err != nil {
+		log.Fatalln("Failed to register external review plugin:", err)
+	}
+
+	if err := pluginsRegistry.Register("APPLICATION", plugins.NewOfficerInputPlugin()); err != nil {
+		log.Fatalln("Failed to register officer input plugin:", err)
+	}
+
+	if err := pluginsRegistry.Register("WAIT_FOR_EVENT", plugins.NewEventWaitPlugin(activeDispatcher)); err != nil {
+		log.Fatalln("Failed to register wait for event plugin:", err)
+	}
+
+	if err := pluginsRegistry.Register("PAYMENT", plugins.NewPaymentPlugin(localDispatcher)); err != nil {
+		log.Fatalln("Failed to register payment plugin:", err)
+	}
+
+	// TODO: Register actual payment plugins here
+	if err := pluginsRegistry.Register("PAYMENT", payments.NewPaymentPlugin()); err != nil {
+		log.Fatalln("Failed to register payment plugin:", err)
+	}
+
+	if err := pluginsRegistry.Register("FIRE_AND_FORGET", plugins.NewAPICallPlugin(activeDispatcher)); err != nil {
+		log.Fatalln("Failed to register http post plugin:", err)
+	}
+
+	// 4. Set up Temporal Managers (parent and task) with deferred task manager wiring
+	var tm *orchestrator.TaskManager
+
+	// --- Parent Workflow handlers ---
+	parentTaskHandler := func(payload engine.TaskPayload) (map[string]any, error) {
+		log.Printf("\n[Parent Workflow] Task activated: node=%s template=%s\n", payload.NodeID, payload.TaskTemplateID)
+		if tm == nil {
+			return nil, fmt.Errorf("task manager is not initialized (misconfiguration)")
+		}
+		return tm.StartTask(payload)
+	}
+
+	parentCompletionHandler := func(workflowID string, finalVariables map[string]any) error {
+		log.Printf("\n[Parent Workflow] Completed. Final state: %v\n", finalVariables)
+		return nil
+	}
+
+	parentWorkflowManager := engine.NewTemporalManager(
+		c,
+		"nsw-parent-workflow-queue",
+		parentTaskHandler,
+		parentCompletionHandler,
+	)
+
+	// --- Task Workflow handlers ---
+	taskHandler := func(payload engine.TaskPayload) (map[string]any, error) {
+		log.Printf("\n[Task Workflow] Step activated: node=%s template=%s\n", payload.NodeID, payload.TaskTemplateID)
+		if tm == nil {
+			return nil, fmt.Errorf("task manager is not initialized (misconfiguration)")
+		}
+		return tm.StartSubTask(payload)
+	}
+
+	taskCompletionHandler := func(workflowID string, finalVariables map[string]any) error {
+		log.Printf("\n[Task Workflow] Completed. Final state: %v\n", finalVariables)
+		if tm != nil {
+			return tm.HandleTaskCompletion(workflowID, finalVariables)
+		}
+		return nil
+	}
+
+	taskWorkflowManager := engine.NewTemporalManager(
+		c,
+		"nsw-task-workflow-queue",
+		taskHandler,
+		taskCompletionHandler,
+	)
+
+	// 5. Wire everything together
+	onTaskCompleted := func(parentWorkflowID string, parentRunID string, parentNodeID string, finalVariables map[string]any) error {
+		err := parentWorkflowManager.TaskDone(context.Background(), parentWorkflowID, parentRunID, parentNodeID, finalVariables)
+		if err != nil {
+			log.Printf("[TaskManager] Failed to wake parent workflow %s: %v", parentWorkflowID, err)
+			return err
+		}
+		log.Printf("[TaskManager] Woke parent workflow %s node %s", parentWorkflowID, parentNodeID)
+		return nil
+	}
+
+	tm = orchestrator.NewTaskManager(db, registry, pluginsRegistry, taskWorkflowManager, onTaskCompleted)
+
+	apiServer := newServer(tm, registry, parentWorkflowManager)
+	apiServer.start(":8080")
+
+	// 6. Start workers
+	log.Println("Starting Parent Workflow Temporal Worker...")
+	if err := parentWorkflowManager.StartWorker(); err != nil {
+		log.Fatalln("Unable to start parent workflow worker:", err)
+	}
+	defer parentWorkflowManager.StopWorker()
+
+	log.Println("Starting Task Workflow Temporal Worker...")
+	if err := taskWorkflowManager.StartWorker(); err != nil {
+		log.Fatalln("Unable to start task workflow worker:", err)
+	}
+	defer taskWorkflowManager.StopWorker()
+
+	// Wait for interrupt
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	<-sigChan
+	log.Println("Shutting down gracefully...")
 }
