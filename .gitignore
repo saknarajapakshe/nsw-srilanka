@@ -25,6 +25,7 @@ backend/configs/*
 !backend/configs/*.example.json
 configs/fcau/
 configs/services.json
+configs/payment_methods.json
 
 # Intellij Configs
 **/.idea/**
