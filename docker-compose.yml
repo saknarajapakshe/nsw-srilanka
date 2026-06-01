@@ -13,6 +13,8 @@ volumes:
     driver: local
   temporal_data:
     driver: local
+  go-cache:
+    driver: local
 
 services:
   # -------------------------------------------------------------------
@@ -163,6 +165,7 @@ services:
     volumes:
       # Direct local host application path mapping
       - .:/src
+      - go-cache:/go/pkg/mod
       # Flexible multi-repo developer mapping slots
       - type: bind
         source: ../nsw

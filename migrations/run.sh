@@ -82,7 +82,10 @@ fi
 # ---------------------------------------------------------------------------
 # Discover and filter migrations
 # ---------------------------------------------------------------------------
-mapfile -t ALL_MIGRATIONS < <(find "$SCRIPT_DIR" -maxdepth 1 -name "*.up.sql" | sort)
+ALL_MIGRATIONS=()
+while IFS= read -r line; do
+  ALL_MIGRATIONS+=("$line")
+done < <(find "$SCRIPT_DIR" -maxdepth 1 -name "*.up.sql" | sort)
 
 if [[ ${#ALL_MIGRATIONS[@]} -eq 0 ]]; then
   echo "No migration files found in $SCRIPT_DIR"

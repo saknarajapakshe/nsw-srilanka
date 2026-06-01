@@ -50,12 +50,6 @@ VALUES (
 INSERT INTO hs_codes (id, hs_code, description, category)
 VALUES 
     (
-        'fcau-hs-code-0001',
-        'fcau-process',
-        'HS code representing the FCAU process for testing.',
-        'FCAU'
-    ),
-    (
         'fcau-hs-code-0002',
         'fcau-health-certificate',
         'HS code for the FCAU health certificate registration flow.',
@@ -66,12 +60,6 @@ ON CONFLICT (id) DO NOTHING;
 -- 6. Seed mappings for test HS codes
 INSERT INTO workflow_template_map (id, hs_code_id, consignment_flow, workflow_template_id)
 VALUES 
-    (
-        'fcau-wf-map-0001',
-        'fcau-hs-code-0001',
-        'EXPORT',
-        'fcau-health-certificate-reg'
-    ),
     (
         'fcau-wf-map-0002',
         'fcau-hs-code-0002',

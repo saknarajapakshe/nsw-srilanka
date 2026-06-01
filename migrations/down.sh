@@ -43,7 +43,10 @@ MIGRATION_DB_HOST="${MIGRATION_DB_HOST//host.docker.internal/localhost}"
 # ---------------------------------------------------------------------------
 # Discover and filter migrations in reverse order
 # ---------------------------------------------------------------------------
-mapfile -t ALL_DOWNS < <(find "$SCRIPT_DIR" -maxdepth 1 -name "*.down.sql" | sort -r)
+ALL_DOWNS=()
+while IFS= read -r line; do
+  ALL_DOWNS+=("$line")
+done < <(find "$SCRIPT_DIR" -maxdepth 1 -name "*.down.sql" | sort -r)
 
 if [[ ${#ALL_DOWNS[@]} -eq 0 ]]; then
   echo "No rollback files found in $SCRIPT_DIR"
