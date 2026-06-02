@@ -68,25 +68,35 @@ cd ../nsw
 ```
 This runs the frontend dev server on `http://localhost:5173`, proxying backend requests to the Docker container at `localhost:8080` and auth requests to the Thunder IDP at `localhost:8090`.
 
-#### 3. Sibling Repositories & Local Development (`go.work`)
-To facilitate seamless editing of sibling packages without pushing changes to GitHub, the backend API container is configured to use Go workspaces. 
+#### 3. Sibling Repositories & Local Development (Modes A & B)
+The backend container can be run in two modes using Go workspaces:
 
-It mounts `nsw-srilanka` to `/src` and bind-mounts sibling directories:
-* `../nsw` -> `/nsw`
-* `../nsw-task-flow` -> `/nsw-task-flow`
-* `../go-temporal-workflow` -> `/go-temporal-workflow`
+##### Mode A: Remote Dependencies (Default)
+By default, the backend API compiles using the dependencies specified in `go.mod` (fetched from GitHub). You do not need to have the sibling repositories cloned locally.
+* **How it works:** `GOWORK` defaults to `off` inside the container. The Docker volume bind mounts fallback to `.` (the current directory) to avoid mount errors on the host if sibling folders don't exist.
 
-This relies on the `go.work` file at the root of `nsw-srilanka`:
-```go
-go 1.25.7
+##### Mode B: Local Workspace Dependencies
+If you are developing across multiple repositories and want local changes in sibling folders to be automatically picked up and compiled:
+1. **Clone the sibling repositories** as siblings to `nsw-srilanka`:
+   * `nsw`
+   * `nsw-task-flow`
+   * `go-temporal-workflow`
+2. **Configure your `.env` file** to enable the workspace and specify the sibling paths:
+   ```env
+   # Enable Go Workspace compilation inside the container
+   GOWORK=/src/go.work
 
-use (
-	.
-	../nsw-task-flow
-	../go-temporal-workflow
-	../nsw/backend
-)
-```
+   # Map host paths to the sibling directories
+   NSW_PATH=../nsw
+   NSW_TASK_FLOW_PATH=../nsw-task-flow
+   GO_TEMPORAL_WORKFLOW_PATH=../go-temporal-workflow
+   ```
+3. **Initialize the `go.work` file** at the root of `nsw-srilanka`. Since workspace files are developer-specific and gitignored, you should generate it using:
+   ```bash
+   go work init . ../nsw-task-flow ../go-temporal-workflow ../nsw/backend
+   ```
+   This will generate a `go.work` file that references these local paths. (If you already have a `go.work` file, you can add missing directories using `go work use <directory_path>`).
+
 To compile and apply your latest Go code changes from any of these local directories, you do not need to restart the entire database/IDP stack. You can quickly rebuild and restart just the backend API container:
 ```bash
 docker compose up -d --force-recreate api
