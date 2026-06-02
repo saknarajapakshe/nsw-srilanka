@@ -5,7 +5,9 @@ go 1.25.7
 require (
 	github.com/OpenNSW/go-temporal-workflow v0.4.0
 	github.com/OpenNSW/nsw-task-flow v0.0.0-20260526134015-a84391d97c36
-	github.com/OpenNSW/nsw/backend v0.0.0-20260529071214-3c79b8bd53d5
+	github.com/OpenNSW/nsw/backend v0.0.0-20260603095413-304662603415
+	go.temporal.io/sdk v1.43.0
+	gorm.io/gorm v1.31.1
 )
 
 require (
@@ -50,7 +52,6 @@ require (
 	github.com/stretchr/objx v0.5.3 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	go.temporal.io/api v1.62.11 // indirect
-	go.temporal.io/sdk v1.43.0 // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
@@ -63,5 +64,4 @@ require (
 	gopkg.in/alexcesaro/quotedprintable.v3 v3.0.0-20150716171945-2caba252f4dc // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/driver/postgres v1.6.0 // indirect
-	gorm.io/gorm v1.31.1 // indirect
 )
