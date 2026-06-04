@@ -6,8 +6,6 @@ RUN corepack enable
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
 COPY apps/trader-app/package.json apps/trader-app/package.json
-COPY packages/jsonforms-renderers/package.json packages/jsonforms-renderers/package.json
-COPY packages/ui/package.json packages/ui/package.json
 
 RUN pnpm install --frozen-lockfile
 
