@@ -24,6 +24,9 @@ coverage.html
 backend/configs/*
 !backend/configs/*.example.json
 
+# Local bucket files
+bucket/*
+
 # Intellij Configs
 **/.idea/**
 
