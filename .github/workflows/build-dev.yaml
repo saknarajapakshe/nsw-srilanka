@@ -31,7 +31,7 @@ jobs:
             context: .
             dockerfile: ./Dockerfile
           - service_name: Trader Portal
-            image_name: trader-app
+            image_name: onetrade-app
             context: ./portals
             dockerfile: ./portals/apps/trader-app/Dockerfile
 
@@ -46,7 +46,7 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
+          username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Convert repository owner to lowercase
