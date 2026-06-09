@@ -5,12 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 
-	engine "github.com/OpenNSW/go-temporal-workflow"
-	flowplugins "github.com/OpenNSW/nsw-task-flow/plugins"
-	"github.com/OpenNSW/nsw/backend/internal/workflow"
+	"github.com/OpenNSW/core/artifact"
+	local "github.com/OpenNSW/core/artifact/loaders/local"
+	"github.com/OpenNSW/core/artifactadapter/generictemplate"
+	"github.com/OpenNSW/core/artifactadapter/workflowdef"
+	"github.com/OpenNSW/core/taskflow/orchestrator"
+	"github.com/OpenNSW/core/taskflow/plugins"
+	"github.com/OpenNSW/core/taskflow/renderer/zoneview"
+	gormstore "github.com/OpenNSW/core/taskflow/store/gorm"
+	"github.com/OpenNSW/core/uiprojector"
+	engine "github.com/OpenNSW/core/workflow"
+
 	"github.com/OpenNSW/nsw/backend/srilanka/internal/scopes"
+	"github.com/OpenNSW/nsw/backend/srilanka/internal/tasks"
 	"go.temporal.io/sdk/client"
 	"gorm.io/gorm"
 
@@ -26,15 +36,16 @@ import (
 	"github.com/OpenNSW/nsw/backend/internal/profile/cha"
 	"github.com/OpenNSW/nsw/backend/internal/profile/company"
 	"github.com/OpenNSW/nsw/backend/internal/profile/user"
-	"github.com/OpenNSW/nsw/backend/internal/taskv2"
-	taskv2plugins "github.com/OpenNSW/nsw/backend/internal/taskv2/plugins"
+
+	tfstore "github.com/OpenNSW/nsw-task-flow/store"
+
 	"github.com/OpenNSW/nsw/backend/internal/taskv2/registry"
-	taskrenderer "github.com/OpenNSW/nsw/backend/internal/taskv2/renderer"
 	"github.com/OpenNSW/nsw/backend/internal/workflow/service"
 	"github.com/OpenNSW/nsw/backend/pkg/remote"
 	"github.com/OpenNSW/nsw/backend/pkg/storage/drivers"
-	"github.com/OpenNSW/nsw/backend/pkg/uiprojector"
 	"github.com/OpenNSW/nsw/backend/srilanka/cmd/server/config"
+	taskplugins "github.com/OpenNSW/nsw/backend/srilanka/internal/tasks/plugins"
+	taskrenderer "github.com/OpenNSW/nsw/backend/srilanka/internal/tasks/renderer"
 	"github.com/OpenNSW/nsw/backend/srilanka/internal/trade"
 )
 
@@ -109,6 +120,25 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, fmt.Errorf("failed to load taskv2 configs for trade: %w", err)
 	}
 
+	// artifactRegistry is the core-based counterpart of templateRegistry above,
+	// built from configs/manifest.json (see Task 1). It feeds the new
+	// core/taskflow orchestrator, which requires a concrete *artifact.Registry.
+	// The two registries co-exist temporarily: templateRegistry still backs
+	// templateService and the parent-runner definition handler, both of which
+	// are pinned to go-temporal-workflow.WorkflowDefinition until WireParentRunner
+	// is ported to core/workflow types.
+	artifactRegistry := artifact.NewRegistry()
+	artifactRegistry.RegisterLoader("local", local.New("configs"))
+	manifestCfg, err := artifact.LoadManifestFile("configs/manifest.json")
+	if err != nil {
+		_ = database.Close(db)
+		return nil, fmt.Errorf("failed to load artifact manifest: %w", err)
+	}
+	if err := artifact.RegisterFromConfig(artifactRegistry, manifestCfg); err != nil {
+		_ = database.Close(db)
+		return nil, fmt.Errorf("failed to register artifacts from manifest: %w", err)
+	}
+
 	templateService := service.NewTemplateService(db).WithRegistry(templateRegistry)
 	chaService := cha.NewService(db)
 	companyService := company.NewService(db)
@@ -136,40 +166,40 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		return parentRunner.TaskDone(context.Background(), parentWorkflowID, parentRunID, parentNodeID, finalVariables)
 	}
 
-	taskV2, stopTaskV2, err := initTaskV2(db, temporalClient, paymentService, companyService, templateRegistry, cfg, onTaskCompleted)
+	task, stopTask, err := initTask(db, temporalClient, paymentService, companyService, artifactRegistry, cfg, onTaskCompleted)
 	if err != nil {
 		temporalClient.Close()
 		_ = database.Close(db)
 		return nil, err
 	}
-	tm := taskV2.Manager
+	tm := task.Manager
 	paymentService.SetTaskCompleter(tm)
 
 	// -------------------------------------------------------------------
 	// Stage 5: Consignment Service & Workflow Parent Runner
 	// -------------------------------------------------------------------
-	consignmentService := consignment.NewService(db, templateService, chaService, companyService, userProfileService, hsCodeService, taskV2.Store)
+	consignmentService := consignment.NewService(db, templateService, chaService, companyService, userProfileService, hsCodeService, consignmentTaskStoreAdapter{store: task.Store})
 	consignmentRouter := consignment.NewRouter(consignmentService, chaService, companyService)
 
-	pr, stopParentRunner, err := workflow.WireParentRunner(temporalClient, tm, consignmentService)
+	pr, stopParentRunner, err := wireParentRunner(temporalClient, tm, consignmentService)
 	if err != nil {
-		_ = stopTaskV2()
+		_ = stopTask()
 		temporalClient.Close()
 		_ = database.Close(db)
 		return nil, fmt.Errorf("failed to wire parent runner: %w", err)
 	}
 	pr.RegisterDefinitionHandler(func(templateID string) (engine.WorkflowDefinition, error) {
-		def, ok := templateRegistry.GetWorkflow(templateID)
-		if !ok {
-			return engine.WorkflowDefinition{}, fmt.Errorf("workflow definition %q not found in registry", templateID)
+		def, err := workflowdef.Load(context.Background(), artifactRegistry, templateID)
+		if err != nil {
+			return engine.WorkflowDefinition{}, fmt.Errorf("workflow definition %q not found in artifact registry: %w", templateID, err)
 		}
 		return def, nil
 	})
 	parentRunner = pr
 
-	if err := consignmentService.RegisterWorkflowManager(parentRunner); err != nil {
+	if err := consignmentService.RegisterWorkflowManagerCore(parentRunner); err != nil {
 		_ = stopParentRunner()
-		_ = stopTaskV2()
+		_ = stopTask()
 		temporalClient.Close()
 		_ = database.Close(db)
 		return nil, fmt.Errorf("failed to register workflow manager with consignment service: %w", err)
@@ -181,7 +211,7 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	storageDriver, err := storage.NewStorageFromConfig(ctx, cfg.Storage)
 	if err != nil {
 		_ = stopParentRunner()
-		_ = stopTaskV2()
+		_ = stopTask()
 		temporalClient.Close()
 		_ = database.Close(db)
 		return nil, fmt.Errorf("failed to initialize storage: %w", err)
@@ -195,7 +225,7 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	authnManager, err := authn.NewManager(userProfileService, cfg.Authn)
 	if err != nil {
 		_ = stopParentRunner()
-		_ = stopTaskV2()
+		_ = stopTask()
 		temporalClient.Close()
 		_ = database.Close(db)
 		return nil, fmt.Errorf("failed to create authn manager: %w", err)
@@ -203,7 +233,7 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 
 	if err := authnManager.Health(); err != nil {
 		_ = stopParentRunner()
-		_ = stopTaskV2()
+		_ = stopTask()
 		temporalClient.Close()
 		_ = authnManager.Close()
 		_ = database.Close(db)
@@ -217,7 +247,7 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	chaHandler := cha.NewHandler(chaService)
 	companyHandler := company.NewHandler(companyService)
 	paymentHandler := payments.NewHTTPHandler(paymentService)
-	taskV2Handler := taskv2.NewHTTPHandler(tm, taskV2.Store, taskV2.Assembler)
+	taskHandler := tasks.NewHTTPHandler(tm, task.Store, task.Assembler)
 
 	// withAuth wraps an individual handler with the authentication middleware.
 	withAuth := authnManager.RequireAuthMiddleware()
@@ -234,7 +264,7 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	})
 	if err != nil {
 		_ = stopParentRunner()
-		_ = stopTaskV2()
+		_ = stopTask()
 		temporalClient.Close()
 		_ = authnManager.Close()
 		_ = database.Close(db)
@@ -279,14 +309,14 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	// API routes. Each handler is wrapped with authn (JWT validation) then a
 	// scope gate. Order matters: withAuth injects the AuthContext; withScope
 	// reads it. Public routes (payments, local-dev storage) are below.
-	mux.Handle("GET /api/v1/tasks/{id}", withAuth(withScope(scopes.TaskRead)(http.HandlerFunc(taskV2Handler.HandleGetTask))))
-	mux.Handle("POST /api/v1/tasks/{id}", withAuth(withScope(scopes.TaskWrite)(http.HandlerFunc(taskV2Handler.HandleCompleteTaskStep))))
+	mux.Handle("GET /api/v1/tasks/{id}", withAuth(withScope(scopes.TaskRead)(http.HandlerFunc(taskHandler.HandleGetTask))))
+	mux.Handle("POST /api/v1/tasks/{id}", withAuth(withScope(scopes.TaskWrite)(http.HandlerFunc(taskHandler.HandleCompleteTaskStep))))
 
 	// TODO(oga-callback): remove once OGA POSTs directly to /api/v1/tasks/{id}
 	// with the bare reviewer payload. This legacy route accepts OGA's
 	// {task_id, workflow_id, payload:{action, content}} envelope and the
 	// handler unwraps payload.content + falls back to body-level task_id.
-	mux.Handle("POST /api/v1/tasks", withAuth(withScope(scopes.TaskWrite)(http.HandlerFunc(taskV2Handler.HandleCompleteTaskStep))))
+	mux.Handle("POST /api/v1/tasks", withAuth(withScope(scopes.TaskWrite)(http.HandlerFunc(taskHandler.HandleCompleteTaskStep))))
 
 	mux.Handle("GET /api/v1/hscodes", withAuth(withScope(scopes.HSCodeRead)(http.HandlerFunc(hsCodeRouter.HandleGetAll))))
 	mux.Handle("GET /api/v1/chas", withAuth(withScope(scopes.CHARead)(http.HandlerFunc(chaHandler.HandleGetCHAs))))
@@ -329,7 +359,7 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		if err := stopParentRunner(); err != nil {
 			closeErrs = append(closeErrs, fmt.Errorf("failed to stop parent runner: %w", err))
 		}
-		if err := stopTaskV2(); err != nil {
+		if err := stopTask(); err != nil {
 			closeErrs = append(closeErrs, fmt.Errorf("failed to stop taskv2: %w", err))
 		}
 		temporalClient.Close()
@@ -349,16 +379,145 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	}, nil
 }
 
-// initTaskV2 consolidates Task V2 engine registrations, remote configs, and wiring.
-func initTaskV2(
+// parentWorkflowQueue is the Temporal task queue the macro/parent workflow
+// runner polls. Mirrors workflow.ParentWorkflowQueue from
+// github.com/OpenNSW/nsw/backend/internal/workflow/wiring.go.
+const parentWorkflowQueue = "INTERPRETER_TASK_QUEUE"
+
+// parentTaskActivator is the narrow surface wireParentRunner needs from the
+// core orchestrator: when the parent graph reaches a Task node, StartTask
+// spawns the corresponding task workflow. *orchestrator.TaskManager satisfies
+// this directly.
+type parentTaskActivator interface {
+	StartTask(ctx context.Context, payload engine.TaskPayload) (map[string]any, error)
+}
+
+// parentUpstreamService is the narrow surface wireParentRunner needs to notify
+// a downstream domain (consignment) when a parent workflow completes.
+// *consignment.Service satisfies this directly via its CompletionHandler method.
+type parentUpstreamService interface {
+	CompletionHandler(workflowID string, finalContext map[string]any) error
+}
+
+// wireParentRunner is the core/workflow port of workflow.WireParentRunner (see
+// github.com/OpenNSW/nsw/backend/internal/workflow/wiring.go). core ships no
+// wrapper for this, so — per the "least file changes" migration approach — the
+// wiring is inlined here, the only place that needs it.
+//
+// It starts the Temporal worker that runs macro/parent workflows on
+// parentWorkflowQueue. When a parent workflow reaches a Task node, the
+// activator's StartTask is invoked to spawn the corresponding task workflow.
+// On parent-workflow completion, upstream.CompletionHandler is invoked so
+// consignment can advance its own state.
+func wireParentRunner(c client.Client, activator parentTaskActivator, upstream parentUpstreamService) (engine.TemporalManager, func() error, error) {
+	if activator == nil {
+		return nil, nil, fmt.Errorf("parent task activator cannot be nil")
+	}
+
+	onActivation := func(payload engine.TaskPayload) (map[string]any, error) {
+		return activator.StartTask(context.Background(), payload)
+	}
+
+	onCompletion := func(workflowID string, finalVariables map[string]any) error {
+		log.Printf("\n[Parent Workflow] Completed. Final state: %v\n", finalVariables)
+		if upstream != nil {
+			if err := upstream.CompletionHandler(workflowID, finalVariables); err != nil {
+				return fmt.Errorf("upstream completion handler: %w", err)
+			}
+		}
+		return nil
+	}
+
+	runner := engine.NewTemporalManager(c, parentWorkflowQueue, onActivation, onCompletion)
+	if err := runner.StartWorker(); err != nil {
+		return nil, nil, fmt.Errorf("failed to start parent workflow worker: %w", err)
+	}
+
+	stop := func() error {
+		runner.StopWorker()
+		return nil
+	}
+
+	return runner, stop, nil
+}
+
+// consignmentTaskStoreAdapter adapts the core-based *gormstore.TaskStore to
+// consignment.TaskStore, which remains pinned to nsw-task-flow/store.TaskRecord
+// (consignment has no "Core" migration variant for this interface, unlike
+// RegisterWorkflowManagerCore). core/taskflow/store.TaskRecord was forked from
+// nsw-task-flow/store.TaskRecord and the two are still field-for-field
+// identical, so this is a straight conversion.
+type consignmentTaskStoreAdapter struct {
+	store *gormstore.TaskStore
+}
+
+func (a consignmentTaskStoreAdapter) GetAllTasks(ctx context.Context, parentWorkflowID string) []tfstore.TaskRecord {
+	records := a.store.GetAllTasks(ctx, parentWorkflowID)
+	out := make([]tfstore.TaskRecord, len(records))
+	for i, r := range records {
+		out[i] = tfstore.TaskRecord{
+			TaskID:                r.TaskID,
+			TaskType:              r.TaskType,
+			State:                 r.State,
+			RenderConfig:          r.RenderConfig,
+			ParentWorkflowID:      r.ParentWorkflowID,
+			ParentRunID:           r.ParentRunID,
+			ParentNodeID:          r.ParentNodeID,
+			TaskWorkflowID:        r.TaskWorkflowID,
+			TaskRunID:             r.TaskRunID,
+			SubTaskNodeID:         r.SubTaskNodeID,
+			ActiveTaskTemplateID:  r.ActiveTaskTemplateID,
+			ActiveOutputNamespace: r.ActiveOutputNamespace,
+			Data:                  r.Data,
+			CreatedAt:             r.CreatedAt,
+			UpdatedAt:             r.UpdatedAt,
+		}
+	}
+	return out
+}
+
+// taskStack bundles the core-orchestrator objects bootstrap needs to expose
+// handlers and to wire the parent workflow runner. It is the local counterpart
+// of the old taskv2.WireResult, now built directly against core/taskflow and
+// core/workflow rather than through a country-agnostic wiring wrapper (core
+// exposes orchestrator.NewTaskManager directly — see the integration guide).
+type taskStack struct {
+	Manager   *orchestrator.TaskManager
+	Runner    engine.TemporalManager
+	Store     *gormstore.TaskStore
+	Assembler *zoneview.ZoneViewAssembler
+}
+
+// registryTemplateProvider adapts the artifact registry to uiprojector's
+// TemplateProvider contract. Generic templates (JSONForms schemas, markdown
+// bodies, etc.) are resolved through generictemplate.Load.
+type registryTemplateProvider struct {
+	reg *artifact.Registry
+}
+
+func (p registryTemplateProvider) GetTemplate(ctx context.Context, id string) ([]byte, error) {
+	raw, err := generictemplate.Load(ctx, p.reg, id)
+	if err != nil {
+		return nil, fmt.Errorf("template %q not found: %w", id, err)
+	}
+	return []byte(raw), nil
+}
+
+// initTask consolidates the task-orchestration engine registrations, remote
+// configs, and wiring against core/taskflow + core/workflow. It builds and
+// starts the orchestration stack on MICRO_WORKFLOW_QUEUE; the returned
+// TemporalManager runs the per-task (micro) sub-workflows, while the
+// parent/macro workflow runner is owned by the workflow package and wired
+// separately (see Stage 5 below).
+func initTask(
 	db *gorm.DB,
 	temporalClient client.Client,
 	paymentService payments.PaymentService,
 	companyService company.Service,
-	templateRegistry *registry.InMemRegistry,
+	artifactRegistry *artifact.Registry,
 	cfg *config.Config,
-	onTaskCompleted func(string, string, string, map[string]any) error,
-) (*taskv2.WireResult, func() error, error) {
+	onTaskCompleted orchestrator.TaskCompletedCallback,
+) (*taskStack, func() error, error) {
 	// Initialize outbound HTTP caller configurations
 	remoteManager := remote.NewManager()
 	if err := remoteManager.LoadServices(cfg.Server.ServicesConfigPath); err != nil {
@@ -366,9 +525,9 @@ func initTaskV2(
 	}
 
 	// Instantiate flow plugins registry
-	pluginsRegistry := flowplugins.NewRegistry()
-	if err := taskv2plugins.Register(pluginsRegistry, remoteManager, paymentService, cfg.Server.ServiceURL, cfg.Server.Debug); err != nil {
-		return nil, nil, fmt.Errorf("failed to register taskv2 plugins: %w", err)
+	pluginsRegistry := plugins.NewRegistry()
+	if err := taskplugins.Register(pluginsRegistry, remoteManager, paymentService, cfg.Server.ServiceURL, cfg.Server.Debug); err != nil {
+		return nil, nil, fmt.Errorf("failed to register task plugins: %w", err)
 	}
 	if err := pluginsRegistry.Register("HSCODE_SPLIT_BUILDER", trade.NewGenericExecutorPlugin(trade.HscodeSplitBuilderFunc)); err != nil {
 		return nil, nil, fmt.Errorf("failed to register HSCODE_SPLIT_BUILDER plugin: %w", err)
@@ -377,14 +536,55 @@ func initTaskV2(
 		return nil, nil, fmt.Errorf("failed to register CHA_PERSIST_WRITER plugin: %w", err)
 	}
 
-	// Construct UI projectors
-	projectors := append(uiprojector.DefaultProjectors(), taskrenderer.NewPaymentProjector(paymentService))
+	taskStore := gormstore.New(db)
 
-	// Wire Task V2 orchestration nodes and workers
-	taskV2, stopTaskV2, err := taskv2.WireTaskV2(db, temporalClient, pluginsRegistry, templateRegistry, projectors, onTaskCompleted)
+	// Construct UI projectors and the renderer/zoneview assembler
+	projectors := append(uiprojector.DefaultProjectors(), taskrenderer.NewPaymentProjector(paymentService))
+	uiAssembler, err := uiprojector.NewAssembler(registryTemplateProvider{reg: artifactRegistry}, projectors)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to wire taskv2: %w", err)
+		return nil, nil, fmt.Errorf("failed to build ui assembler: %w", err)
+	}
+	taskRenderer := zoneview.NewTaskRenderer(uiAssembler)
+	zoneAssembler := zoneview.NewZoneViewAssembler(taskRenderer)
+
+	var tm *orchestrator.TaskManager
+
+	// Handlers for events on the per-task (micro) sub-workflows running on
+	// MICRO_WORKFLOW_QUEUE. Nodes inside a task workflow activate subtasks
+	// via tm.StartSubTask, which dispatches to the matching plugin.
+	microActivationHandler := func(payload engine.TaskPayload) (map[string]any, error) {
+		log.Printf("\n[Micro Workflow] SubTask activated: node=%s template=%s\n", payload.NodeID, payload.TaskTemplateID)
+		if tm == nil {
+			return nil, fmt.Errorf("task manager is not initialized (misconfiguration)")
+		}
+		return tm.StartSubTask(context.Background(), payload)
 	}
 
-	return taskV2, stopTaskV2, nil
+	microCompletionHandler := func(workflowID string, finalVariables map[string]any) error {
+		log.Printf("\n[Micro Workflow] Completed. Final state: %v\n", finalVariables)
+		if tm == nil {
+			return fmt.Errorf("task manager is not initialized (misconfiguration)")
+		}
+		return tm.HandleTaskCompletion(context.Background(), workflowID, finalVariables)
+	}
+
+	workflowRunner := engine.NewTemporalManager(temporalClient, "MICRO_WORKFLOW_QUEUE", microActivationHandler, microCompletionHandler)
+
+	tm = orchestrator.NewTaskManager(taskStore, artifactRegistry, pluginsRegistry, workflowRunner, onTaskCompleted, taskRenderer)
+
+	if err := workflowRunner.StartWorker(); err != nil {
+		return nil, nil, fmt.Errorf("failed to start micro workflow worker: %w", err)
+	}
+
+	stop := func() error {
+		workflowRunner.StopWorker()
+		return nil
+	}
+
+	return &taskStack{
+		Manager:   tm,
+		Runner:    workflowRunner,
+		Store:     taskStore,
+		Assembler: zoneAssembler,
+	}, stop, nil
 }
