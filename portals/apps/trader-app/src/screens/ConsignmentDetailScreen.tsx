@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Button, Badge, Spinner, Text } from '@radix-ui/themes'
 import { ArrowLeftIcon, ReloadIcon } from '@radix-ui/react-icons'
@@ -11,6 +11,16 @@ import { getStateColor, formatState, formatDateTime } from '../utils/consignment
 
 type ConsignmentErrorKey = 'idRequired' | 'notFound' | 'loadFailed'
 
+// A freshly created consignment can be returned before its workflow has been
+// provisioned (workflowNodes still empty). Rather than flashing the empty
+// "no workflow" state, re-fetch a bounded number of times with exponential
+// backoff until the nodes appear or the consignment reaches a terminal state.
+const PROVISION_MAX_ATTEMPTS = 5
+const PROVISION_BASE_DELAY_MS = 1000
+const PROVISION_MAX_DELAY_MS = 5000
+
+type FetchMode = 'initial' | 'refresh' | 'poll'
+
 export function ConsignmentDetailScreen() {
   const { consignmentId } = useParams<{ consignmentId: string }>()
   const navigate = useNavigate()
@@ -19,50 +29,120 @@ export function ConsignmentDetailScreen() {
   const [consignment, setConsignment] = useState<ConsignmentDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  const [provisioning, setProvisioning] = useState(false)
   const [error, setError] = useState<ConsignmentErrorKey | null>(null)
+  const provisionAttemptsRef = useRef(0)
+  const provisionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const requestCountRef = useRef(0)
 
-  const fetchConsignment = useCallback(async () => {
-    if (!consignmentId) {
-      setError('idRequired')
-      setLoading(false)
-      return
+  const clearProvisionTimer = useCallback(() => {
+    if (provisionTimerRef.current) {
+      clearTimeout(provisionTimerRef.current)
+      provisionTimerRef.current = null
     }
+  }, [])
 
-    setLoading(true)
-    setError(null)
-    try {
-      const result = await getConsignment(consignmentId, api)
-      if (result) {
-        setConsignment(result)
-      } else {
-        setError('notFound')
+  const fetchConsignment = useCallback(
+    async (mode: FetchMode = 'initial') => {
+      if (!consignmentId) {
+        setError('idRequired')
+        setLoading(false)
+        return
       }
-    } catch (err) {
-      console.error('Failed to fetch consignment:', err)
-      setError('loadFailed')
-    } finally {
-      setLoading(false)
-      setRefreshing(false)
-    }
-  }, [api, consignmentId])
+
+      clearProvisionTimer()
+      // Track this request so stale responses (e.g. a manual refresh fired
+      // while a poll is still pending) can be ignored, preventing duplicate
+      // concurrent polling loops.
+      const requestId = ++requestCountRef.current
+
+      // A poll continuation keeps the attempt counter and the current view; an
+      // initial load or a manual refresh starts a fresh provisioning cycle.
+      if (mode !== 'poll') {
+        provisionAttemptsRef.current = 0
+        setError(null)
+      }
+      if (mode === 'initial') setLoading(true)
+
+      try {
+        const result = await getConsignment(consignmentId, api)
+        if (requestId !== requestCountRef.current) return
+
+        if (!result) {
+          setError('notFound')
+          setProvisioning(false)
+          return
+        }
+        setConsignment(result)
+
+        const awaitingProvisioning =
+          (result.workflowNodes?.length ?? 0) === 0 &&
+          (result.state === 'INITIALIZED' || result.state === 'IN_PROGRESS')
+
+        if (awaitingProvisioning && provisionAttemptsRef.current < PROVISION_MAX_ATTEMPTS) {
+          const delay = Math.min(PROVISION_BASE_DELAY_MS * 2 ** provisionAttemptsRef.current, PROVISION_MAX_DELAY_MS)
+          provisionAttemptsRef.current += 1
+          setProvisioning(true)
+          provisionTimerRef.current = setTimeout(() => void fetchConsignmentRef.current('poll'), delay)
+        } else {
+          setProvisioning(false)
+        }
+      } catch (err) {
+        if (requestId !== requestCountRef.current) return
+        console.error('Failed to fetch consignment:', err)
+
+        // A transient failure mid-provisioning should keep retrying with
+        // backoff rather than dropping the user onto a misleading
+        // "no workflow" or error screen. Only surface the error once retries
+        // are exhausted.
+        if (mode === 'poll' && provisionAttemptsRef.current < PROVISION_MAX_ATTEMPTS) {
+          const delay = Math.min(PROVISION_BASE_DELAY_MS * 2 ** provisionAttemptsRef.current, PROVISION_MAX_DELAY_MS)
+          provisionAttemptsRef.current += 1
+          provisionTimerRef.current = setTimeout(() => void fetchConsignmentRef.current('poll'), delay)
+        } else {
+          setProvisioning(false)
+          setError('loadFailed')
+        }
+      } finally {
+        if (requestId === requestCountRef.current) {
+          if (mode === 'initial') setLoading(false)
+          if (mode === 'refresh') setRefreshing(false)
+        }
+      }
+    },
+    [api, consignmentId, clearProvisionTimer],
+  )
+
+  // The provisioning poll reschedules itself via setTimeout. Invoke through a
+  // ref to the latest fetchConsignment so a pending timeout never fires a stale
+  // closure, and so fetchConsignment doesn't need to depend on itself.
+  const fetchConsignmentRef = useRef(fetchConsignment)
+  useEffect(() => {
+    fetchConsignmentRef.current = fetchConsignment
+  }, [fetchConsignment])
 
   const handleRefresh = () => {
     setRefreshing(true)
-    fetchConsignment()
+    void fetchConsignment('refresh')
   }
 
   useEffect(() => {
-    fetchConsignment()
-  }, [fetchConsignment])
+    void fetchConsignment('initial')
+    return () => clearProvisionTimer()
+  }, [fetchConsignment, clearProvisionTimer])
 
-  if (loading) {
-    const isProcessing = !consignment
+  if (loading || provisioning) {
+    const message = provisioning
+      ? t('consignments.detail.loading.settingUp')
+      : consignment
+        ? t('consignments.detail.loading.consignment')
+        : t('consignments.detail.loading.processing')
     return (
       <div className="p-6">
         <div className="flex items-center justify-center py-12">
           <Spinner size="3" />
           <Text size="3" color="gray" className="ml-3">
-            {isProcessing ? t('consignments.detail.loading.processing') : t('consignments.detail.loading.consignment')}
+            {message}
           </Text>
         </div>
       </div>
@@ -101,7 +181,9 @@ export function ConsignmentDetailScreen() {
               <ArrowLeftIcon />
               {t('consignments.detail.backToList')}
             </Button>
-            {isLoadFailed && <Button onClick={fetchConsignment}>{t('consignments.detail.tryAgain')}</Button>}
+            {isLoadFailed && (
+              <Button onClick={() => void fetchConsignment('initial')}>{t('consignments.detail.tryAgain')}</Button>
+            )}
           </div>
         </div>
       </div>

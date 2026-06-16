@@ -76,6 +76,7 @@ const en = {
       loading: {
         processing: 'Processing your submission...',
         consignment: 'Loading consignment...',
+        settingUp: 'Setting up your consignment...',
       },
       back: 'Back',
       backToList: 'Back to Consignments',
@@ -121,6 +122,7 @@ const en = {
     loading: 'Loading task...',
     back: 'Back to Tasks',
     goBack: 'Go Back',
+    refresh: 'Refresh',
     error: {
       missingId: 'Task ID is missing.',
       fetchFailed: 'Failed to fetch task details.',
