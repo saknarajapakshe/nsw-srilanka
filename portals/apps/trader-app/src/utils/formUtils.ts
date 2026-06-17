@@ -68,6 +68,9 @@ const generateSampleValue = (property: any, fieldName: string): unknown => {
       if (property.format === 'date-time') {
         return new Date().toISOString()
       }
+      if (property.format === 'file') {
+        return 'sample_document.pdf'
+      }
       if (property.format === 'data-url') {
         // Return a small base64 pixel image as sample file
         return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
@@ -113,7 +116,7 @@ export const autoFillForm = (schema: JsonSchema, currentValues: any = {}): any =
 
   // Helper to check if a value is empty
   const isEmpty = (val: unknown): boolean => {
-    return val === undefined || val === null || val === ''
+    return val === undefined || val === null || val === '' || (Array.isArray(val) && val.length === 0)
   }
 
   // Helper to recursively auto-fill nested objects

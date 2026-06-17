@@ -12,11 +12,15 @@
           "oneOf": [
             {
               "const": "fcau-health-certificate-reg",
-              "title": "fcau-health-certificate (FCAU Flow)"
+              "title": "FCAU Health Certificate (FCAU Flow)"
             },
             {
               "const": "npqs-export-phytosanitary-reg",
-              "title": "npqs-phyto-certificate (NPQS Flow)"
+              "title": "NPQS Phyto Certificate (NPQS Flow)"
+            },
+            {
+              "const": "cda-certificate-reg",
+              "title": "CDA Coconut Certificate (CDA Flow)"
             }
           ]
         },
@@ -24,7 +28,9 @@
         "minItems": 1
       }
     },
-    "required": ["hs_codes"]
+    "required": [
+      "hs_codes"
+    ]
   },
   "uiSchema": {
     "type": "VerticalLayout",
