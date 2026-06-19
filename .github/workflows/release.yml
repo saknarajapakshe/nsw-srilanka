@@ -19,7 +19,7 @@ on:
   # Automatic: pushing a SemVer tag (e.g. v1.2.0) triggers a full release.
   push:
     tags:
-      - 'v*.*.*'
+      - 'v*.*.*' # Only trigger on tags that look like SemVer (v1.2.3) to avoid accidental releases from non-release tags.
   workflow_dispatch:
     inputs:
       version:
@@ -169,6 +169,8 @@ jobs:
           # Empty for default-stage images; set to `migrate` for the migrator.
           target: ${{ matrix.target }}
           push: ${{ steps.release-mode.outputs.enabled == 'true' }}
+          build-args: |
+            BUILD_VERSION=${{ steps.version.outputs.tag }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # provenance and sbom attach SLSA build attestations to the image in GHCR.
