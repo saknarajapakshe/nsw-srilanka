@@ -171,6 +171,8 @@ jobs:
           push: ${{ steps.release-mode.outputs.enabled == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_VERSION=${{ steps.version.outputs.tag }}
           # provenance and sbom attach SLSA build attestations to the image in GHCR.
           provenance: mode=max
           sbom: true
