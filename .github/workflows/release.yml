@@ -43,7 +43,7 @@ jobs:
       matrix:
         include:
           - service_name: Trader Portal
-            image_name: trader-app
+            image_name: onetrade-app
             context: ./portals
             dockerfile: ./portals/apps/trader-app/Dockerfile
             description: NSW Trader Portal Frontend
@@ -171,6 +171,8 @@ jobs:
           push: ${{ steps.release-mode.outputs.enabled == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_VERSION=${{ steps.version.outputs.tag }}
           # provenance and sbom attach SLSA build attestations to the image in GHCR.
           provenance: mode=max
           sbom: true
@@ -228,7 +230,6 @@ jobs:
           trivy image \
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
-            --ignorefile .trivyignore \
             --format table \
             ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
 
@@ -358,13 +359,13 @@ jobs:
             This release publishes the platform Docker images for the NSW Single Window.
 
             ### Published Image Targets
-            - `${{ env.REGISTRY }}/${{ steps.repo_owner.outputs.owner }}/trader-app:${{ needs.collate-digests.outputs.version }}`
+            - `${{ env.REGISTRY }}/${{ steps.repo_owner.outputs.owner }}/onetrade-app:${{ needs.collate-digests.outputs.version }}`
             - `${{ env.REGISTRY }}/${{ steps.repo_owner.outputs.owner }}/nsw-backend:${{ needs.collate-digests.outputs.version }}`
             - `${{ env.REGISTRY }}/${{ steps.repo_owner.outputs.owner }}/nsw-migrate:${{ needs.collate-digests.outputs.version }}`
 
             ### Pull Images
             ```bash
-            docker pull ${{ env.REGISTRY }}/${{ steps.repo_owner.outputs.owner }}/trader-app:${{ needs.collate-digests.outputs.version }}
+            docker pull ${{ env.REGISTRY }}/${{ steps.repo_owner.outputs.owner }}/onetrade-app:${{ needs.collate-digests.outputs.version }}
             docker pull ${{ env.REGISTRY }}/${{ steps.repo_owner.outputs.owner }}/nsw-backend:${{ needs.collate-digests.outputs.version }}
             docker pull ${{ env.REGISTRY }}/${{ steps.repo_owner.outputs.owner }}/nsw-migrate:${{ needs.collate-digests.outputs.version }}
             ```
